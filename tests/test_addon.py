@@ -267,3 +267,21 @@ def test_socket_server_end_to_end(addon):
     assert results[1]["count"] == 2
     assert results[2]["result"] == "y" * 300000
     assert "not found" in str(results[3])
+
+
+def test_register_and_unregister_survive_a_second_copy(addon):
+    """Installing the legacy file and the extension must not break enabling."""
+    import bpy
+
+    # A second copy taking over the same class names, then both being disabled,
+    # used to raise out of unregister() and spam Blender's console.
+    addon.register()
+    assert hasattr(bpy.types, "BLENDERMCP_PT_panel")
+
+    addon.unregister()
+    addon.unregister()
+    assert not hasattr(bpy.types, "BLENDERMCP_PT_panel")
+    assert not hasattr(bpy.context.scene, "blendermcp_port")
+
+    addon.register()
+    assert hasattr(bpy.context.scene, "blendermcp_port")

@@ -16,6 +16,16 @@ Install: Edit > Preferences > Add-ons > Install..., pick this file, enable
 press "Start server".
 """
 
+bl_info = {
+    "name": "Blender MCP",
+    "author": "Blender MCP contributors",
+    "version": (1, 0, 0),
+    "blender": (3, 2, 0),
+    "location": "View3D > Sidebar (N) > MCP",
+    "description": "JSON command server that exposes Blender to an MCP client",
+    "category": "Interface",
+}
+
 import base64
 import contextlib
 import io
@@ -29,15 +39,6 @@ from typing import Any, Callable, Dict, List, Optional
 import bpy
 import mathutils
 
-bl_info = {
-    "name": "Blender MCP",
-    "author": "Blender MCP contributors",
-    "version": (1, 0, 0),
-    "blender": (3, 2, 0),
-    "location": "View3D > Sidebar (N) > MCP",
-    "description": "JSON command server that exposes Blender to an MCP client",
-    "category": "Interface",
-}
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9876
@@ -849,6 +850,12 @@ def register() -> None:
         default=True,
     )
     for cls in _CLASSES:
+        # Installing both the legacy add-on and the extension leaves the older
+        # copy's classes registered; replace them instead of failing to enable.
+        existing = getattr(bpy.types, cls.__name__, None)
+        if existing is not None:
+            with contextlib.suppress(RuntimeError, ValueError):
+                bpy.utils.unregister_class(existing)
         bpy.utils.register_class(cls)
 
 
@@ -858,10 +865,13 @@ def unregister() -> None:
         _server.stop()
         _server = None
     for cls in reversed(_CLASSES):
-        bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.blendermcp_port
-    del bpy.types.Scene.blendermcp_server_running
-    del bpy.types.Scene.blendermcp_allow_python
+        # A second copy of the add-on (legacy file plus extension) may already
+        # have taken these class names over; disabling must stay quiet either way.
+        with contextlib.suppress(RuntimeError, ValueError):
+            bpy.utils.unregister_class(cls)
+    for prop in ("blendermcp_port", "blendermcp_server_running", "blendermcp_allow_python"):
+        with contextlib.suppress(AttributeError):
+            delattr(bpy.types.Scene, prop)
 
 
 if __name__ == "__main__":

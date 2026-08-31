@@ -1,0 +1,10 @@
+schema_version = "1.0.0"
+
+id = "blender_mcp"
+version = "1.0.0"
+name = "Blender MCP"
+tagline = "JSON command server that exposes Blender to an MCP client"
+maintainer = "Blender MCP contributors"
+type = "add-on"
+license = ["SPDX:MIT"]
+blender_version_min = "4.2.0"
