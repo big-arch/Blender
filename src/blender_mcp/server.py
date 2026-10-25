@@ -13,6 +13,7 @@ Run with stdio transport (the default) — MCP clients launch it as a subprocess
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from enum import Enum
@@ -27,6 +28,7 @@ try:  # mcp >= 2.0
 except ImportError:  # pragma: no cover - mcp 1.x compatibility
     from mcp.server.fastmcp import FastMCP as MCPServer, Image  # type: ignore[no-redef]
 
+from . import library
 from .connection import (
     BlenderCommandError,
     BlenderConnectionError,
@@ -40,7 +42,10 @@ mcp = MCPServer(
         "Tools for driving a running Blender instance. Start with "
         "blender_get_scene_info to see what exists before creating or editing "
         "objects. blender_execute_python is the escape hatch for anything the "
-        "dedicated tools do not cover."
+        "dedicated tools do not cover. When a ready-made model would help "
+        "(a prop, character, vehicle, furniture...), search the Scenario 3D "
+        "Collection with blender_search_library and import it with "
+        "blender_import_library_asset instead of modelling from primitives."
     ),
 )
 
@@ -796,6 +801,146 @@ async def blender_get_viewport_screenshot(params: ViewportScreenshotInput) -> An
         return result
     summary = {key: value for key, value in result.items() if key != "image"}
     return _image_result(result, summary)
+
+
+class SearchLibraryInput(StrictModel):
+    """Input model for searching the Scenario 3D Collection."""
+
+    query: Optional[str] = Field(default=None, description="Words to look for in prompts/metadata, e.g. 'dragon', 'chair'. Omit to browse.")
+    limit: int = Field(default=10, description="Results to return", ge=1, le=100)
+    offset: int = Field(default=0, description="Skip this many results (paging)", ge=0)
+
+
+class ImportLibraryAssetInput(StrictModel):
+    """Input model for downloading and importing a library model."""
+
+    asset_id: str = Field(..., description="'id' from blender_search_library, e.g. 'scenario:asset_13ERkWLBHdsJ2bNxNp5k6jw7'", min_length=1)
+    format: Optional[str] = Field(default=None, description="Force a file format: blend, glb, fbx or ply. Default: best available.")
+    name: Optional[str] = Field(default=None, description="Rename the imported top-level object(s) to this")
+    location: Optional[XYZ] = Field(default=None, description="Move the imported top-level object(s) here")
+    import_into_blender: bool = Field(default=True, description="False only downloads and returns the local path")
+
+
+_IMPORT_CODE = """
+import bpy
+path, fmt, name, location = {path!r}, {fmt!r}, {name!r}, {location!r}
+before = set(bpy.data.objects)
+if fmt == "blend":
+    with bpy.data.libraries.load(path) as (src, dst):
+        dst.objects = src.objects
+    for obj in dst.objects:
+        if obj is not None and obj.type not in {{"CAMERA", "LIGHT"}}:
+            bpy.context.scene.collection.objects.link(obj)
+elif fmt == "glb":
+    bpy.ops.import_scene.gltf(filepath=path)
+elif fmt == "fbx":
+    bpy.ops.import_scene.fbx(filepath=path)
+elif fmt == "ply":
+    if hasattr(bpy.ops.wm, "ply_import"):
+        bpy.ops.wm.ply_import(filepath=path)
+    else:
+        bpy.ops.import_mesh.ply(filepath=path)
+new = [o for o in bpy.data.objects if o not in before]
+roots = [o for o in new if o.parent not in new]
+for i, obj in enumerate(roots):
+    if name:
+        obj.name = name if len(roots) == 1 else f"{{name}}.{{i:03d}}"
+    if location is not None:
+        obj.location = location
+result = {{"imported": [o.name for o in roots], "object_count": len(new)}}
+"""
+
+
+@mcp.tool(
+    name="blender_search_library",
+    annotations=ToolAnnotations(
+        title="Search 3D Model Library",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def blender_search_library(params: SearchLibraryInput) -> str:
+    """Search the Scenario 3D Collection (Hugging Face) for ready-made models.
+
+    ~1,300 AI-generated models (GLB, .blend, FBX, PLY), CC BY 4.0 — credit
+    "Scenario". Nothing is downloaded here; follow up with
+    blender_import_library_asset. Does not need Blender to be running.
+
+    Args:
+        params (SearchLibraryInput): query, limit, offset.
+
+    Returns:
+        str: JSON list of {"id", "prompt", "workflow", "model", "formats",
+        "files", "preview"} where preview is a thumbnail URL.
+        On failure: "Error: <reason>".
+
+    Examples:
+        - Use when: "put a dragon in the scene" -> query="dragon".
+        - Don't use when: the user wants a simple primitive — use blender_create_object.
+    """
+    try:
+        rows = await asyncio.to_thread(library.search, params.query, params.limit, params.offset)
+    except Exception as exc:  # network / API failures go back as text
+        return f"Error: library search failed: {exc}"
+    return _dump(rows)
+
+
+@mcp.tool(
+    name="blender_import_library_asset",
+    annotations=ToolAnnotations(
+        title="Import Model From Library",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
+async def blender_import_library_asset(params: ImportLibraryAssetInput) -> str:
+    """Download a model from the Scenario 3D Collection and import it into Blender.
+
+    Files are cached (BLENDER_MCP_ASSET_CACHE, default
+    ~/.cache/blender_mcp/3d-collection) so repeat imports are instant. Needs
+    Python execution enabled in the add-on panel.
+
+    Args:
+        params (ImportLibraryAssetInput): asset_id, format, name, location,
+            import_into_blender.
+
+    Returns:
+        str: JSON {"asset_id", "file", "local_path", "imported", "object_count",
+        "credit"}. On failure: "Error: <reason>".
+
+    Examples:
+        - Use when: blender_search_library returned a fitting id.
+    """
+    try:
+        meta = await asyncio.to_thread(library.get, params.asset_id)
+        remote = library.pick_file(meta["files"], params.format)
+        local = await asyncio.to_thread(library.download, remote)
+    except Exception as exc:
+        return f"Error: could not fetch '{params.asset_id}': {exc}"
+    summary: Dict[str, Any] = {
+        "asset_id": meta["id"],
+        "prompt": meta.get("prompt"),
+        "file": remote,
+        "local_path": str(local),
+        "credit": "Scenario 3D Collection, CC BY 4.0",
+    }
+    if not params.import_into_blender:
+        return _dump(summary)
+    code = _IMPORT_CODE.format(
+        path=str(local),
+        fmt=local.suffix.lstrip(".").lower(),
+        name=params.name,
+        location=tuple(params.location) if params.location else None,
+    )
+    result = await _call("execute_python", {"code": code}, timeout=300)
+    if isinstance(result, str):
+        return result
+    summary.update(result.get("result") or {})
+    return _dump(summary)
 
 
 def main() -> None:

@@ -183,3 +183,18 @@ uv pip install bpy   # требует ровно ту версию Python, по�
 ## Лицензия
 
 MIT.
+
+## Библиотека 3D-моделей
+
+Сервер умеет брать готовые модели из
+[Scenario 3D Collection](https://huggingface.co/datasets/scenario-labs/3d-collection)
+(~1 300 моделей: GLB, .blend, FBX, PLY; лицензия CC BY 4.0, указывайте «Scenario»).
+Ничего заранее не качается — файл скачивается в момент импорта и кешируется.
+
+| Инструмент | Что делает |
+| --- | --- |
+| `blender_search_library` | поиск по описаниям, возвращает id, форматы и превью |
+| `blender_import_library_asset` | скачивает модель и импортирует в сцену (имя, позиция) |
+
+Кеш: `~/.cache/blender_mcp/3d-collection`, меняется переменной `BLENDER_MCP_ASSET_CACHE`.
+Для импорта в панели аддона должно быть разрешено выполнение Python.
